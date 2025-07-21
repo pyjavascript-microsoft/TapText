@@ -1,498 +1,497 @@
-// TapText DM App - CSS Overload Edition
-// © 2025 BloxStudios. All Rights Reserved.
-
 const express = require('express');
+const session = require('express-session');
+const bcrypt = require('bcrypt');
 const http = require('http');
 const socketIo = require('socket.io');
-const mongoose = require('mongoose');
-const bcrypt = require('bcryptjs');
-const bodyParser = require('body-parser');
-const cookieParser = require('cookie-parser');
-const session = require('express-session');
+const Datastore = require('nedb');
+
 const app = express();
 const server = http.createServer(app);
 const io = socketIo(server);
 
 const PORT = process.env.PORT || 3000;
-const SESSION_SECRET = process.env.SESSION_SECRET || "bloxstudios_secure";
+const MAX_WARNINGS = 3;
 
-mongoose.connect(process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/taptext_full', {
-  useNewUrlParser: true,
-  useUnifiedTopology: true,
-});
+const usersDB = new Datastore({ filename: 'users.db', autoload: true });
+const messagesDB = new Datastore({ filename: 'messages.db', autoload: true });
 
-const User = mongoose.model('User', new mongoose.Schema({
-  username: String,
-  password: String,
-  role: { type: String, default: "user" },
-  banned: { type: Boolean, default: false },
-  bio: { type: String, default: "" },
-}));
-
-const Message = mongoose.model('Message', new mongoose.Schema({
-  sender: String,
-  receiver: String,
-  content: String,
-  timestamp: { type: Date, default: Date.now },
-}));
-
-app.use(bodyParser.urlencoded({ extended: true }));
-app.use(cookieParser());
+// Middleware
+app.use(express.urlencoded({ extended: true }));
+app.use(express.json());
 app.use(session({
-  secret: SESSION_SECRET,
+  secret: 'bloxstudios_secret_2025',
   resave: false,
-  saveUninitialized: true,
+  saveUninitialized: false,
 }));
 
-async function createAdminIfNotExists() {
-  const adminExists = await User.findOne({ role: 'admin' });
-  if (!adminExists) {
-    const hashed = await bcrypt.hash('Admin@321', 10);
-    await new User({ username: 'admin', password: hashed, role: 'admin' }).save();
-    console.log('Admin account created: username=admin, password=Admin@321');
-  }
+// Helpers
+function requireLogin(req, res, next) {
+  if (!req.session.user) return res.redirect('/login');
+  next();
 }
-createAdminIfNotExists();
 
-app.get('/', async (req, res) => {
-  if (!req.session.user) return res.send(loginPage());
-  const user = await User.findOne({ username: req.session.user });
-  if (!user || user.banned) return res.send("You are banned.");
-  const users = await User.find({ username: { $ne: user.username } });
-  const options = users.map(u => `<option value="${u.username}">${u.username}</option>`).join('');
-  res.send(chatPage(user.username, user.role, options));
+function requireAdmin(req, res, next) {
+  if (!req.session.user || req.session.user.role !== 'admin') return res.status(403).send('Forbidden');
+  next();
+}
+
+// ---------- ROUTES ----------
+
+// Home redirect
+app.get('/', (req, res) => {
+  if (req.session.user) return res.redirect('/chat');
+  res.redirect('/login');
 });
 
-app.post('/register', async (req, res) => {
+// Register page
+app.get('/register', (req, res) => {
+  res.send(htmlPage('Register', `
+    <form method="POST" action="/register" autocomplete="off">
+      <input name="username" placeholder="Username" required />
+      <input type="password" name="password" placeholder="Password" required />
+      <button type="submit">Register</button>
+    </form>
+    <p>Already have an account? <a href="/login">Login here</a></p>
+  `));
+});
+
+// Register handler
+app.post('/register', (req, res) => {
   const { username, password } = req.body;
-  const exists = await User.findOne({ username });
-  if (exists) return res.send("User already exists.");
-  const hashed = await bcrypt.hash(password, 10);
-  await new User({ username, password: hashed }).save();
-  req.session.user = username;
-  res.redirect('/');
+  if (!username || !password) return res.send(htmlError('Username and password required', '/register'));
+  usersDB.findOne({ username }, (err, user) => {
+    if (user) return res.send(htmlError('Username already exists', '/register'));
+    bcrypt.hash(password, 10, (err, hash) => {
+      if (err) return res.send(htmlError('Server error hashing password', '/register'));
+      usersDB.insert({
+        username,
+        displayName: username,
+        password: hash,
+        role: 'user',
+        bio: '',
+        warnings: 0,
+        followers: [],
+      }, () => res.redirect('/login'));
+    });
+  });
 });
 
-app.post('/login', async (req, res) => {
+// Login page
+app.get('/login', (req, res) => {
+  res.send(htmlPage('Login', `
+    <form method="POST" action="/login" autocomplete="off">
+      <input name="username" placeholder="Username" required />
+      <input type="password" name="password" placeholder="Password" required />
+      <button type="submit">Login</button>
+    </form>
+    <p>Don't have an account? <a href="/register">Register here</a></p>
+  `));
+});
+
+// Login handler
+app.post('/login', (req, res) => {
   const { username, password } = req.body;
-  const user = await User.findOne({ username });
-  if (!user || user.banned) return res.send("Access denied.");
-  const match = await bcrypt.compare(password, user.password);
-  if (!match) return res.send("Incorrect password.");
-  req.session.user = username;
-  res.redirect('/');
+  usersDB.findOne({ username }, (err, user) => {
+    if (!user) return res.send(htmlError('Invalid username or password', '/login'));
+    if (user.role === 'banned') return res.send(htmlError('You are banned', '/login'));
+    bcrypt.compare(password, user.password, (err, same) => {
+      if (!same) return res.send(htmlError('Invalid username or password', '/login'));
+      req.session.user = { id: user._id, username: user.username, role: user.role };
+      res.redirect('/chat');
+    });
+  });
 });
 
-app.post('/update-profile', async (req, res) => {
-  if (!req.session.user) return res.redirect('/');
-  const { bio, password } = req.body;
-  const updates = {};
-  if (bio) updates.bio = bio;
-  if (password) updates.password = await bcrypt.hash(password, 10);
-  await User.updateOne({ username: req.session.user }, { $set: updates });
-  res.redirect('/');
-});
-
+// Logout
 app.get('/logout', (req, res) => {
-  req.session.destroy(() => res.redirect('/'));
+  req.session.destroy(() => res.redirect('/login'));
 });
 
-app.get('/admin', async (req, res) => {
-  const currentUser = await User.findOne({ username: req.session.user });
-  if (!currentUser || currentUser.role !== 'admin') return res.send("Admins only.");
-  const users = await User.find({});
-  const userList = users.map(u => `
-    <li>
-      <b>${u.username}</b> (${u.role}) - ${u.banned ? '<span style="color:red">Banned</span>' : 'Active'}
-      <form style="display:inline" method="POST" action="/admin/action">
-        <input type="hidden" name="target" value="${u.username}" />
-        <select name="action">
-          <option>ban</option>
-          <option>unban</option>
-          <option>promote</option>
-          <option>demote</option>
-          <option>warn</option>
-        </select>
-        <button>Go</button>
-      </form>
-    </li>
-  `).join('');
-  res.send(`
-    <h2>Admin Panel</h2>
-    <ul>${userList}</ul>
-    <a href="/">Back</a>
-  `);
+// Chat page + Profile edit + Followers + Admin link
+app.get('/chat', requireLogin, (req, res) => {
+  const sessionUser = req.session.user;
+  usersDB.find({ role: { $ne: 'banned' } }, (err, users) => {
+    if (err) return res.send(htmlError('Server error', '/login'));
+    usersDB.findOne({ _id: sessionUser.id }, (err, fullUser) => {
+      if (err || !fullUser) return res.send(htmlError('User not found', '/login'));
+      // User dropdown for DM
+      const userOptions = users
+        .filter(u => u.username !== fullUser.username)
+        .map(u => `<option value="${u.username}">${escapeHtml(u.displayName || u.username)} (${escapeHtml(u.username)})</option>`).join('');
+
+      const adminPanelLink = (sessionUser.role === 'admin') ? `<a class="glow-button" href="/admin">Admin Panel</a>` : '';
+
+      res.send(htmlPage('TapText Chat', `
+        <div class="container">
+          <h1 class="neon">Welcome, ${escapeHtml(fullUser.displayName || fullUser.username)}!</h1>
+          <div class="flex-row">
+            <section class="chat-section">
+              <h2>Direct Messages</h2>
+              <select id="dmUserSelect">
+                <option value="" disabled selected>Select user to chat</option>
+                ${userOptions}
+              </select>
+              <div id="chatWindow" class="chat-window"></div>
+              <form id="chatForm">
+                <input id="chatInput" autocomplete="off" placeholder="Type your message..." />
+                <button type="submit">Send</button>
+              </form>
+            </section>
+            <section class="profile-section">
+              <h2>Edit Profile</h2>
+              <form method="POST" action="/update-profile" autocomplete="off">
+                <label>Username:<br/><input name="username" value="${escapeHtml(fullUser.username)}" required /></label><br/>
+                <label>Display Name:<br/><input name="displayName" value="${escapeHtml(fullUser.displayName || '')}" /></label><br/>
+                <label>Bio:<br/><textarea name="bio">${escapeHtml(fullUser.bio || '')}</textarea></label><br/>
+                <label>New Password:<br/><input type="password" name="password" placeholder="Leave blank to keep" /></label><br/>
+                <button type="submit" class="glow-button">Update Profile</button>
+              </form>
+              <h3>Followers (${fullUser.followers.length})</h3>
+              <ul id="followersList" class="followers-list">
+                ${fullUser.followers.map(f => `<li>${escapeHtml(f)}</li>`).join('')}
+              </ul>
+              <div>
+                <h3>Follow User</h3>
+                <select id="followSelect">
+                  <option value="" disabled selected>Select user to follow</option>
+                  ${users.filter(u => u.username !== fullUser.username && !fullUser.followers.includes(u.username))
+                    .map(u => `<option value="${u.username}">${escapeHtml(u.displayName || u.username)}</option>`).join('')}
+                </select>
+                <button id="followBtn" class="glow-button">Follow</button>
+              </div>
+              <div>
+                <h3>Unfollow User</h3>
+                <select id="unfollowSelect">
+                  <option value="" disabled selected>Select user to unfollow</option>
+                  ${fullUser.followers.map(u => `<option value="${escapeHtml(u)}">${escapeHtml(u)}</option>`).join('')}
+                </select>
+                <button id="unfollowBtn" class="glow-button">Unfollow</button>
+              </div>
+              ${adminPanelLink}
+              <p><a href="/logout" class="glow-button red">Logout</a></p>
+            </section>
+          </div>
+        </div>
+
+        <script src="/socket.io/socket.io.js"></script>
+        <script>
+          const socket = io();
+          const chatForm = document.getElementById('chatForm');
+          const chatInput = document.getElementById('chatInput');
+          const chatWindow = document.getElementById('chatWindow');
+          const dmUserSelect = document.getElementById('dmUserSelect');
+
+          let currentChatUser = null;
+
+          dmUserSelect.addEventListener('change', () => {
+            chatWindow.innerHTML = '';
+            currentChatUser = dmUserSelect.value;
+            socket.emit('joinRoom', currentChatUser);
+            socket.emit('getHistory', currentChatUser);
+          });
+
+          socket.on('chatHistory', messages => {
+            chatWindow.innerHTML = '';
+            messages.forEach(msg => {
+              const div = document.createElement('div');
+              div.className = msg.from === "${escapeJs(sessionUser.username)}" ? 'msg sent' : 'msg received';
+              div.textContent = \`\${msg.from}: \${msg.text}\`;
+              chatWindow.appendChild(div);
+            });
+            chatWindow.scrollTop = chatWindow.scrollHeight;
+          });
+
+          socket.on('message', msg => {
+            if (msg.from === currentChatUser || msg.to === currentChatUser) {
+              const div = document.createElement('div');
+              div.className = msg.from === "${escapeJs(sessionUser.username)}" ? 'msg sent' : 'msg received';
+              div.textContent = \`\${msg.from}: \${msg.text}\`;
+              chatWindow.appendChild(div);
+              chatWindow.scrollTop = chatWindow.scrollHeight;
+            }
+          });
+
+          chatForm.addEventListener('submit', e => {
+            e.preventDefault();
+            if (!currentChatUser) return alert('Select a user to chat with!');
+            if (!chatInput.value.trim()) return;
+            socket.emit('sendMessage', { to: currentChatUser, text: chatInput.value.trim() });
+            chatInput.value = '';
+          });
+
+          // Follow/unfollow buttons
+          document.getElementById('followBtn').onclick = () => {
+            const userToFollow = document.getElementById('followSelect').value;
+            if (!userToFollow) return alert('Select a user to follow');
+            fetch('/follow', {
+              method: 'POST',
+              headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify({ username: userToFollow })
+            }).then(res => res.text()).then(msg => {
+              alert(msg);
+              location.reload();
+            });
+          };
+
+          document.getElementById('unfollowBtn').onclick = () => {
+            const userToUnfollow = document.getElementById('unfollowSelect').value;
+            if (!userToUnfollow) return alert('Select a user to unfollow');
+            fetch('/unfollow', {
+              method: 'POST',
+              headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify({ username: userToUnfollow })
+            }).then(res => res.text()).then(msg => {
+              alert(msg);
+              location.reload();
+            });
+          };
+        </script>
+      `));
+    });
+  });
 });
 
-app.post('/admin/action', async (req, res) => {
-  const admin = await User.findOne({ username: req.session.user });
-  if (!admin || admin.role !== 'admin') return res.send("Access denied.");
-  const { target, action } = req.body;
-  if (target === admin.username) return res.send("You can't modify yourself.");
-  const updates = {
-    ban: { banned: true },
-    unban: { banned: false },
-    promote: { role: "admin" },
-    demote: { role: "user" },
-    warn: {},
-  };
-  if (updates[action]) await User.updateOne({ username: target }, { $set: updates[action] });
-  res.redirect('/admin');
+// Profile update
+app.post('/update-profile', requireLogin, (req, res) => {
+  const { username, displayName, bio, password } = req.body;
+  const userId = req.session.user.id;
+  usersDB.findOne({ _id: userId }, (err, currentUser) => {
+    if (err || !currentUser) return res.send(htmlError('User not found', '/chat'));
+
+    // Validate username change uniqueness
+    if (username !== currentUser.username) {
+      usersDB.findOne({ username }, (err, exists) => {
+        if (exists) return res.send(htmlError('Username already taken', '/chat'));
+        saveUpdates();
+      });
+    } else {
+      saveUpdates();
+    }
+
+    function saveUpdates() {
+      const updates = {
+        bio: bio || '',
+        displayName: displayName || username,
+      };
+      if (username !== currentUser.username) {
+        updates.username = username;
+      }
+      if (password) {
+        bcrypt.hash(password, 10, (err, hash) => {
+          if (err) return res.send(htmlError('Error updating password', '/chat'));
+          updates.password = hash;
+          finishUpdate();
+        });
+      } else {
+        finishUpdate();
+      }
+
+      function finishUpdate() {
+        usersDB.update({ _id: userId }, { $set: updates }, {}, (err) => {
+          if (err) return res.send(htmlError('Update failed', '/chat'));
+          // Update session username if changed
+          if (updates.username) {
+            req.session.user.username = updates.username;
+          }
+          res.redirect('/chat');
+        });
+      }
+    }
+  });
+});
+
+// Follow user
+app.post('/follow', requireLogin, (req, res) => {
+  const follower = req.session.user.username;
+  const toFollow = req.body.username;
+  if (follower === toFollow) return res.send('Cannot follow yourself.');
+  usersDB.findOne({ username: toFollow }, (err, userToFollow) => {
+    if (!userToFollow) return res.send('User to follow not found.');
+    usersDB.findOne({ username: follower }, (err, currentUser) => {
+      if (!currentUser) return res.send('Current user not found.');
+      if (currentUser.followers.includes(toFollow)) return res.send('Already following.');
+      usersDB.update({ _id: currentUser._id }, { $push: { followers: toFollow } }, {}, err => {
+        if (err) return res.send('Failed to follow.');
+        res.send('Followed successfully.');
+      });
+    });
+  });
+});
+
+// Unfollow user
+app.post('/unfollow', requireLogin, (req, res) => {
+  const follower = req.session.user.username;
+  const toUnfollow = req.body.username;
+  usersDB.findOne({ username: follower }, (err, currentUser) => {
+    if (!currentUser) return res.send('Current user not found.');
+    usersDB.update({ _id: currentUser._id }, { $pull: { followers: toUnfollow } }, {}, err => {
+      if (err) return res.send('Failed to unfollow.');
+      res.send('Unfollowed successfully.');
+    });
+  });
+});
+
+// Admin Panel
+app.get('/admin', requireAdmin, (req, res) => {
+  usersDB.find({}, (err, users) => {
+    if (err) return res.send(htmlError('Server error', '/chat'));
+    let rows = users.map(u => `
+      <tr>
+        <td>${escapeHtml(u.username)}</td>
+        <td>${escapeHtml(u.displayName || '')}</td>
+        <td>${escapeHtml(u.role)}</td>
+        <td>${escapeHtml(u.bio || '')}</td>
+        <td>${u.warnings || 0}</td>
+        <td>
+          <form method="POST" action="/admin/action" class="admin-form">
+            <input type="hidden" name="userId" value="${u._id}" />
+            <select name="action" required>
+              <option disabled selected>Action</option>
+              <option value="ban">Ban</option>
+              <option value="unban">Unban</option>
+              <option value="promote">Promote to Admin</option>
+              <option value="demote">Demote to User</option>
+              <option value="warn">Warn</option>
+              <option value="unwarn">Remove Warning</option>
+            </select>
+            <button type="submit" class="glow-button small">Apply</button>
+          </form>
+        </td>
+      </tr>
+    `).join('');
+    res.send(htmlPage('Admin Panel', `
+      <h1 class="neon">Admin Panel</h1>
+      <a href="/chat" class="glow-button">Back to Chat</a>
+      <table class="admin-table">
+        <thead>
+          <tr>
+            <th>Username</th><th>Display Name</th><th>Role</th><th>Bio</th><th>Warnings</th><th>Actions</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+      <p><a href="/logout" class="glow-button red">Logout</a></p>
+    `));
+  });
+});
+
+// Admin actions
+app.post('/admin/action', requireAdmin, (req, res) => {
+  const { userId, action } = req.body;
+  usersDB.findOne({ _id: userId }, (err, user) => {
+    if (!user) return res.send(htmlError('User not found', '/admin'));
+    switch (action) {
+      case 'ban':
+        usersDB.update({ _id: userId }, { $set: { role: 'banned' } }, {}, () => res.redirect('/admin'));
+        break;
+      case 'unban':
+        usersDB.update({ _id: userId }, { $set: { role: 'user' } }, {}, () => res.redirect('/admin'));
+        break;
+      case 'promote':
+        usersDB.update({ _id: userId }, { $set: { role: 'admin' } }, {}, () => res.redirect('/admin'));
+        break;
+      case 'demote':
+        usersDB.update({ _id: userId }, { $set: { role: 'user' } }, {}, () => res.redirect('/admin'));
+        break;
+      case 'warn':
+        let newWarnings = (user.warnings || 0) + 1;
+        let updates = { warnings: newWarnings };
+        if (newWarnings >= MAX_WARNINGS) {
+          updates.role = 'banned';
+        }
+        usersDB.update({ _id: userId }, { $set: updates }, {}, () => res.redirect('/admin'));
+        break;
+      case 'unwarn':
+        let unwarnCount = Math.max((user.warnings || 0) - 1, 0);
+        usersDB.update({ _id: userId }, { $set: { warnings: unwarnCount } }, {}, () => res.redirect('/admin'));
+        break;
+      default:
+        res.redirect('/admin');
+    }
+  });
+});
+
+// --- Socket.io real-time chat ---
+
+io.use((socket, next) => {
+  const sessionID = socket.handshake.headers.cookie
+    ?.split('; ')
+    .find(row => row.startsWith('connect.sid='));
+  // No complex session sharing here; assume logged in
+  next();
 });
 
 io.on('connection', socket => {
-  socket.on('join', async username => {
-    socket.username = username;
-    const messages = await Message.find({
-      $or: [{ sender: username }, { receiver: username }]
-    }).sort({ timestamp: 1 });
-    socket.emit('messageHistory', messages);
-  });
+  let username = null;
+  // To identify user by session (improve in prod)
+  socket.on('init', data => {
+    username
 
-  socket.on('sendMessage', async data => {
-    const { sender, receiver, content } = data;
-    const toUser = await User.findOne({ username: receiver });
-    if (toUser?.banned) return;
-    const msg = await new Message({ sender, receiver, content }).save();
-    io.emit('newMessage', msg);
-  });
+
+
+
+
+
+ChatGPT said:
+= data.username;
 });
 
-function loginPage() {
-  return `
-  <!DOCTYPE html>
-  <html lang="en">
-  <head>
-  <title>TapText - Login/Register</title>
-  <style>
-    /* CSS OVERLOAD START */
-    @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@600&display=swap');
-    body {
-      margin: 0; padding: 0;
-      background: linear-gradient(135deg, #0f2027, #203a43, #2c5364);
-      font-family: 'Poppins', sans-serif;
-      color: white;
-      text-align: center;
-      height: 100vh;
-      overflow: hidden;
-    }
-    h2 {
-      font-size: 3rem;
-      margin-top: 3rem;
-      text-shadow: 0 0 10px #00ffff, 0 0 20px #00ffff;
-      animation: glow 2s ease-in-out infinite alternate;
-    }
-    form {
-      background: rgba(255, 255, 255, 0.1);
-      margin: 2rem auto;
-      padding: 2rem;
-      border-radius: 20px;
-      max-width: 400px;
-      box-shadow: 0 0 30px #00ffff;
-      backdrop-filter: blur(10px);
-      transition: box-shadow 0.3s ease;
-    }
-    form:hover {
-      box-shadow: 0 0 40px #0ff, 0 0 60px #0ff;
-    }
-    input {
-      width: 80%;
-      padding: 15px;
-      margin: 10px 0;
-      border: none;
-      border-radius: 30px;
-      font-size: 1.2rem;
-      text-align: center;
-      transition: background 0.3s ease;
-      background: rgba(255, 255, 255, 0.3);
-      color: #000;
-      font-weight: 600;
-      box-shadow: inset 0 0 5px #0ff;
-    }
-    input:focus {
-      outline: none;
-      background: #0ff;
-      color: #000;
-      box-shadow: 0 0 15px #0ff;
-    }
-    button {
-      background: #00ffff;
-      border: none;
-      padding: 15px 40px;
-      margin-top: 15px;
-      font-size: 1.4rem;
-      font-weight: 700;
-      color: #000;
-      border-radius: 50px;
-      cursor: pointer;
-      box-shadow: 0 0 20px #00ffff;
-      transition: background 0.3s ease;
-    }
-    button:hover {
-      background: #00cccc;
-      box-shadow: 0 0 30px #00cccc;
-    }
-    @keyframes glow {
-      from { text-shadow: 0 0 5px #00ffff, 0 0 10px #00ffff; }
-      to { text-shadow: 0 0 20px #00ffff, 0 0 40px #00ffff; }
-    }
-    /* CSS OVERLOAD END */
-  </style>
-  </head>
-  <body>
-    <h2>TapText - Login/Register</h2>
-    <form method="POST" action="/login" autocomplete="off">
-      <input name="username" required placeholder="Username" autocomplete="off"/>
-      <input type="password" name="password" required placeholder="Password" autocomplete="off"/>
-      <button>Login</button>
-    </form>
-    <form method="POST" action="/register" autocomplete="off">
-      <input name="username" required placeholder="Username" autocomplete="off"/>
-      <input type="password" name="password" required placeholder="Password" autocomplete="off"/>
-      <button>Register</button>
-    </form>
-  </body>
-  </html>
-  `;
+socket.on('joinRoom', user => {
+socket.join(user);
+});
+
+socket.on('sendMessage', ({ to, text }) => {
+const from = username;
+const msg = { from, to, text, time: Date.now() };
+messagesDB.insert(msg);
+socket.to(to).emit('message', msg);
+socket.emit('message', msg);
+});
+
+socket.on('getHistory', (withUser) => {
+messagesDB.find({ $or: [
+{ from: username, to: withUser },
+{ from: withUser, to: username }
+] }).sort({ time: 1 }).exec((err, messages) => {
+socket.emit('chatHistory', messages);
+});
+});
+});
+
+// Auto-create admin on first run
+usersDB.findOne({ username: 'admin' }, (err, admin) => {
+if (!admin) {
+bcrypt.hash('Admin@321', 10, (err, hash) => {
+usersDB.insert({
+username: 'admin',
+displayName: 'Admin',
+password: hash,
+role: 'admin',
+bio: 'Default admin account',
+warnings: 0,
+followers: [],
+}, () => console.log('[+] Default admin account created: admin / Admin@321'));
+});
+}
+});
+
+server.listen(PORT, () => {
+console.log(🌐 TapText running on http://localhost:${PORT});
+});
+
+// -------------- HTML/CSS UTILS ------------------
+
+function htmlPage(title, body) {
+return `
+
+<!DOCTYPE html><html><head><meta charset="UTF-8"> <title>${title}</title> <style> body { font-family: 'Segoe UI', sans-serif; background: #000; color: #0ff; text-shadow: 0 0 5px #0ff; margin: 0; padding: 0; } a { color: #0ff; } .container { padding: 20px; max-width: 1000px; margin: auto; } .neon { font-size: 2em; color: #0ff; text-shadow: 0 0 10px #0ff, 0 0 20px #0ff; } input, textarea, select, button { background: #111; color: #0ff; border: 1px solid #0ff; padding: 10px; margin: 5px 0; width: 100%; } .chat-window { background: #111; height: 300px; overflow-y: scroll; border: 2px solid #0ff; padding: 10px; } .msg { margin-bottom: 10px; } .msg.sent { text-align: right; color: #0f0; } .msg.received { text-align: left; color: #f0f; } .glow-button { background: #111; color: #0ff; border: 2px solid #0ff; text-shadow: 0 0 10px #0ff; box-shadow: 0 0 10px #0ff, 0 0 20px #0ff; transition: all 0.2s; } .glow-button:hover { background: #0ff; color: #000; box-shadow: 0 0 20px #0ff, 0 0 40px #0ff; } .glow-button.red { color: #f00; border-color: #f00; box-shadow: 0 0 10px #f00; } .glow-button.red:hover { background: #f00; color: #000; } .flex-row { display: flex; gap: 40px; } .profile-section, .chat-section { flex: 1; } table.admin-table { width: 100%; border-collapse: collapse; } table.admin-table th, table.admin-table td { border: 1px solid #0ff; padding: 8px; } .followers-list li { padding: 4px 0; } </style> </head><body>${body}</body></html>`; }
+function htmlError(msg, backLink) {
+return htmlPage('Error', <h1>Error</h1> <p>${msg}</p> <a href="${backLink}" class="glow-button">Go back</a> );
 }
 
-function chatPage(username, role, options) {
-  return `
-  <!DOCTYPE html>
-  <html lang="en">
-  <head>
-  <title>TapText - Chat</title>
-  <style>
-    /* CSS OVERLOAD START */
-    @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@600&display=swap');
-    body {
-      margin: 0; padding: 0;
-      background: linear-gradient(120deg, #2980b9, #6dd5fa, #ffffff);
-      font-family: 'Poppins', sans-serif;
-      color: #222;
-      display: flex;
-      flex-direction: column;
-      height: 100vh;
-      overflow: hidden;
-      user-select: none;
-    }
-    header {
-      background: #0f2027;
-      color: #0ff;
-      padding: 20px 40px;
-      font-size: 1.8rem;
-      font-weight: 700;
-      box-shadow: 0 0 15px #00ffff;
-      text-shadow: 0 0 10px #00ffff;
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-    }
-    header a {
-      color: #0ff;
-      text-decoration: none;
-      font-weight: 600;
-      padding: 8px 15px;
-      border-radius: 30px;
-      background: #222;
-      box-shadow: 0 0 10px #00ffff;
-      transition: background 0.3s ease;
-    }
-    header a:hover {
-      background: #0ff;
-      color: #000;
-      box-shadow: 0 0 20px #00ffff;
-    }
-    main {
-      flex: 1;
-      display: flex;
-      flex-direction: column;
-      padding: 20px 40px;
-      gap: 15px;
-      background: #ffffffdd;
-      box-shadow: inset 0 0 40px #00ffff88;
-      border-radius: 40px 40px 0 0;
-    }
-    form#profileForm {
-      background: #0ff4;
-      padding: 15px 20px;
-      border-radius: 25px;
-      display: flex;
-      gap: 10px;
-      box-shadow: 0 0 20px #0ff;
-      font-weight: 600;
-    }
-    form#profileForm input {
-      flex: 1;
-      border: none;
-      border-radius: 30px;
-      padding: 12px 15px;
-      font-size: 1rem;
-      transition: box-shadow 0.3s ease;
-      outline: none;
-      box-shadow: inset 0 0 10px #0ff;
-    }
-    form#profileForm input:focus {
-      box-shadow: 0 0 15px #0ff;
-    }
-    form#profileForm button {
-      padding: 12px 25px;
-      border: none;
-      border-radius: 50px;
-      background: #00ffff;
-      color: #000;
-      font-weight: 700;
-      cursor: pointer;
-      box-shadow: 0 0 25px #00ffff;
-      transition: background 0.3s ease;
-    }
-    form#profileForm button:hover {
-      background: #00cccc;
-      box-shadow: 0 0 30px #00cccc;
-    }
-    select, input#content {
-      padding: 12px 20px;
-      font-size: 1.1rem;
-      border-radius: 30px;
-      border: none;
-      outline: none;
-      box-shadow: inset 0 0 15px #0ff;
-      transition: box-shadow 0.3s ease;
-      margin-right: 10px;
-      width: 250px;
-      max-width: 80vw;
-    }
-    select:focus, input#content:focus {
-      box-shadow: 0 0 25px #0ff;
-    }
-    button#sendBtn {
-      padding: 12px 40px;
-      background: #00ffff;
-      border: none;
-      border-radius: 50px;
-      font-weight: 700;
-      color: #000;
-      cursor: pointer;
-      box-shadow: 0 0 25px #00ffff;
-      transition: background 0.3s ease;
-    }
-    button#sendBtn:hover {
-      background: #00cccc;
-      box-shadow: 0 0 30px #00cccc;
-    }
-    #messages {
-      flex: 1;
-      background: #000;
-      border-radius: 30px;
-      padding: 15px 20px;
-      color: #0ff;
-      font-family: monospace;
-      font-size: 1rem;
-      overflow-y: auto;
-      box-shadow: inset 0 0 40px #00ffff;
-      user-select: text;
-      white-space: pre-wrap;
-      word-wrap: break-word;
-    }
-    #messages p {
-      margin: 5px 0;
-      padding: 5px 10px;
-      border-radius: 15px;
-      background: linear-gradient(45deg, #00ffff88, #009999cc);
-      box-shadow: 0 0 10px #00ffffaa;
-      display: inline-block;
-      max-width: 80%;
-    }
-    #messages p.self {
-      background: linear-gradient(45deg, #ff6b6bcc, #ff0000cc);
-      text-align: right;
-      float: right;
-      clear: both;
-    }
-    a.admin-link {
-      margin-left: 20px;
-      color: #00ffff;
-      font-weight: 700;
-      text-decoration: underline;
-      cursor: pointer;
-      transition: color 0.3s ease;
-    }
-    a.admin-link:hover {
-      color: #009999;
-    }
-  </style>
-  </head>
-  <body>
-    <header>
-      TapText — Welcome <b>${username}</b> (${role})
-      <span>
-        <a href="/logout">Logout</a>
-        ${role === 'admin' ? '<a href="/admin" class="admin-link">Admin Panel</a>' : ''}
-      </span>
-    </header>
-    <main>
-      <form id="profileForm" method="POST" action="/update-profile" autocomplete="off">
-        <input name="bio" placeholder="Update Bio (Optional)" />
-        <input name="password" type="password" placeholder="New Password (Optional)" />
-        <button type="submit">Update Profile</button>
-      </form>
-      <div style="display:flex; align-items:center; margin-bottom:15px;">
-        <select id="receiver" title="Select user to message">${options}</select>
-        <input id="content" autocomplete="off" placeholder="Type your message here..." />
-        <button id="sendBtn">Send</button>
-      </div>
-      <div id="messages" tabindex="0" aria-live="polite" aria-label="Chat messages"></div>
-    </main>
-    <script src="/socket.io/socket.io.js"></script>
-    <script>
-      const socket = io();
-      const user = "${username}";
-      socket.emit("join", user);
-      const messagesBox = document.getElementById("messages");
-
-      socket.on("messageHistory", msgs => {
-        messagesBox.innerHTML = '';
-        msgs.forEach(m => {
-          const p = document.createElement("p");
-          p.textContent = m.sender + ": " + m.content;
-          if(m.sender === user) p.classList.add("self");
-          messagesBox.appendChild(p);
-        });
-        messagesBox.scrollTop = messagesBox.scrollHeight;
-      });
-
-      socket.on("newMessage", msg => {
-        if(msg.sender === user || msg.receiver === user) {
-          const p = document.createElement("p");
-          p.textContent = msg.sender + ": " + msg.content;
-          if(msg.sender === user) p.classList.add("self");
-          messagesBox.appendChild(p);
-          messagesBox.scrollTop = messagesBox.scrollHeight;
-        }
-      });
-
-      document.getElementById("sendBtn").addEventListener("click", () => {
-        const to = document.getElementById("receiver").value;
-        const content = document.getElementById("content").value.trim();
-        if(!to || !content) {
-          alert("Select user and enter message.");
-          return;
-        }
-        socket.emit("sendMessage", { sender: user, receiver: to, content });
-        document.getElementById("content").value = "";
-      });
-
-      // Allow pressing Enter to send message
-      document.getElementById("content").addEventListener("keypress", e => {
-        if(e.key === "Enter") {
-          e.preventDefault();
-          document.getElementById("sendBtn").click();
-        }
-      });
-    </script>
-  </body>
-  </html>
-  `;
+function escapeHtml(str) {
+return (str || '').replace(/</g, '<').replace(/>/g, '>');
 }
-
-server.listen(PORT, () => console.log(`TapText running on http://localhost:${PORT}`));
+function escapeJs(str) {
+return (str || '').replace(/"/g, '\"');
+}
