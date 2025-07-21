@@ -432,7 +432,7 @@ io.on('connection', socket => {
 
 
 
-ChatGPT said:
+
 = data.username;
 });
 
