@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en" >
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>TapText - BloxStudios</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="app">
+
+    <!-- Landing Page -->
+    <section id="landing" class="visible">
+      <h1>🔥 TapText - BloxStudios 🔥</h1>
+      <p>Connect, chat, and build community.</p>
+      <button id="btnLogin">Login</button>
+      <button id="btnGetStarted">Get Started</button>
+    </section>
+
+    <!-- Login Page -->
+    <section id="login" class="hidden">
+      <h2>Login</h2>
+      <form id="loginForm">
+        <input type="text" id="loginUsername" placeholder="Username" required autocomplete="off" />
+        <input type="password" id="loginPassword" placeholder="Password" required autocomplete="off" />
+        <button type="submit">Login</button>
+      </form>
+      <p>Don't have an account? <button id="goToRegister" class="link-btn">Get Started</button></p>
+      <p><button id="backToLandingFromLogin" class="link-btn">Back</button></p>
+      <div id="loginError" class="error-msg"></div>
+    </section>
+
+    <!-- Register Page -->
+    <section id="register" class="hidden">
+      <h2>Register</h2>
+      <form id="registerForm">
+        <input type="text" id="regUsername" placeholder="Username" required autocomplete="off" />
+        <input type="text" id="regDisplayName" placeholder="Display Name" required autocomplete="off" />
+        <input type="date" id="regBirthdate" placeholder="Birthdate" required />
+        <input type="password" id="regPassword" placeholder="Password" required autocomplete="off" />
+        <input type="password" id="regPassword2" placeholder="Confirm Password" required autocomplete="off" />
+        <button type="submit">Register</button>
+      </form>
+      <p>Already have an account? <button id="goToLogin" class="link-btn">Login</button></p>
+      <p><button id="backToLandingFromRegister" class="link-btn">Back</button></p>
+      <div id="registerError" class="error-msg"></div>
+    </section>
+
+    <!-- Chat Page -->
+    <section id="chat" class="hidden">
+      <h2>Welcome, <span id="chatDisplayName"></span> <small>(<span id="chatRole"></span>)</small></h2>
+      <button id="logoutBtn">Logout</button>
+
+      <div id="chatContainer">
+        <div id="usersList">
+          <h3>Users</h3>
+          <ul id="userListUl"></ul>
+        </div>
+
+        <div id="chatMessages">
+          <ul id="messagesUl"></ul>
+          <form id="sendMsgForm">
+            <select id="selectUserTo" required>
+              <option value="" disabled selected>Select User to DM</option>
+            </select>
+            <input id="msgInput" autocomplete="off" placeholder="Type your message..." required />
+            <button type="submit">Send</button>
+          </form>
+        </div>
+      </div>
+
+      <!-- Admin Panel -->
+      <section id="adminPanel" class="hidden">
+        <h3>Admin Panel</h3>
+        <h4>All Messages</h4>
+        <ul id="adminMessagesUl"></ul>
+
+        <h4>Manage Users</h4>
+        <form id="adminPromoteForm">
+          <input type="text" id="promoteUsername" placeholder="Username to Promote" autocomplete="off" />
+          <button type="submit">Promote to Admin</button>
+        </form>
+
+        <form id="adminDemoteForm">
+          <input type="text" id="demoteUsername" placeholder="Username to Demote" autocomplete="off" />
+          <button type="submit">Demote to User</button>
+        </form>
+
+        <form id="adminWarnForm">
+          <input type="text" id="warnUsername" placeholder="Username to Warn" autocomplete="off" />
+          <input type="text" id="warnReason" placeholder="Reason" autocomplete="off" />
+          <button type="submit">Warn User</button>
+        </form>
+
+        <div id="adminMsg"></div>
+      </section>
+    </section>
+  </div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
